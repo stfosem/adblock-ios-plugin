@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <stdatomic.h>
 #include "fishhook.h"
 #import "domain_list.h"
@@ -52,13 +53,14 @@ static dispatch_queue_t lookup_queue;
 static RadixNode *domain_trie_root = NULL;
 static uint8_t *bloom_filter = NULL;
 
-static int (*orig_getaddrinfo)(const char *restrict, const char *restrict,
-                               const struct addrinfo *restrict,
-                               struct addrinfo **restrict) = NULL;
-static struct hostent *(*orig_gethostbyname)(const char *) = NULL;
-static struct hostent *(*orig_gethostbyname2)(const char *) = NULL;
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+static int (*orig_connectx)(int, const struct sockaddr *, socklen_t, const struct sockaddr *, socklen_t, void *, uint32_t, void *, uint32_t, uint32_t) = NULL;
 static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t) = NULL;
+static ssize_t (*orig_send)(int, const void *, size_t, int) = NULL;
+static ssize_t (*orig_sendmsg)(int, const struct msghdr *, int) = NULL;
+static ssize_t (*orig_write)(int, const void *, size_t) = NULL;
+static Boolean (*orig_CFSocketConnectToAddress)(CFSocketRef, CFDataRef) = NULL;
+static CFSocketError (*orig_CFSocketSendData)(CFSocketRef, CFDataRef, CFDataRef, double) = NULL;
 static DNSServiceErrorType (*orig_DNSServiceQueryRecord)(DNSServiceRef *sdRef,
                                                          DNSServiceFlags flags,
                                                          uint32_t interfaceIndex,
@@ -67,7 +69,6 @@ static DNSServiceErrorType (*orig_DNSServiceQueryRecord)(DNSServiceRef *sdRef,
                                                          uint16_t rrclass,
                                                          DNSServiceQueryRecordReply callBack,
                                                          void *context) = NULL;
-
 static Boolean (*orig_CFNetServiceSetClient)(CFNetServiceRef theService,
                                              CFNetServiceClientCallBack clientCB,
                                              CFNetServiceClientContext *clientContext) = NULL;
@@ -79,6 +80,7 @@ static CFNetServiceRef (*orig_CFNetServiceCreate)(CFAllocatorRef alloc,
 static Boolean (*orig_CFNetServiceResolveWithTimeout)(CFNetServiceRef theService,
                                                       CFTimeInterval timeout,
                                                       CFStreamError *error) = NULL;
+static void (*orig_CFStreamCreatePairWithSocketToHost)(CFAllocatorRef, CFStringRef, UInt32, CFReadStreamRef _Nullable *, CFWriteStreamRef _Nullable *) = NULL;
 static CFReadStreamRef (*orig_CFStreamCreateForHTTPRequest)(CFAllocatorRef alloc,
                                                            CFHTTPMessageRef request) = NULL;
 static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(CFAllocatorRef alloc,
@@ -91,15 +93,14 @@ static IMP orig_NSNetServiceInitWithDomainService = NULL;
 static IMP orig_NSNetServiceResolve = NULL;
 static IMP orig_NSURLSessionDataTaskWithURL = NULL;
 static IMP orig_NSURLSessionDataTaskWithRequest = NULL;
+static IMP orig_NSURLConnectionSendSynchronousRequest = NULL;
 static IMP orig_NSURLConnectionSendAsynchronousRequest = NULL;
+static IMP orig_NSURLConnectionInitWithRequest = NULL;
+static IMP orig_NSURLConnectionConnectionWithRequestDelegate = NULL;
 static IMP orig_UIWebViewLoadRequest = NULL;
 static IMP orig_WKWebViewLoadRequest = NULL;
-
-static inline int search_domain(const RadixNode *root, const char *hostname);
-static int is_domain_blocked(const char *hostname);
-static void dns_cache_insert(const char *domain, int blocked);
-static int dns_cache_lookup(const char *domain, int *blocked);
-static BOOL is_url_blocked(NSURL *url);
+static IMP orig_NSURLSessionDownloadTaskWithURL = NULL;
+static IMP orig_NSURLSessionDownloadTaskWithRequest = NULL;
 
 static inline void CFStringToBuffer(CFStringRef string, char *buffer, size_t bufferSize) {
     if (string && buffer && bufferSize > 0) {
@@ -219,6 +220,7 @@ static void dns_cache_insert(const char *domain, int blocked) {
     pthread_mutex_unlock(&cache_mutex[mutex_idx]);
 }
 
+static inline int search_domain(const RadixNode *root, const char *hostname);
 static RadixNode *create_radix_node(void) {
     RadixNode *node = calloc(1, sizeof(RadixNode));
     return node;
@@ -289,6 +291,11 @@ static void build_domain_trie(void) {
 static int is_domain_blocked(const char *hostname) {
     if (!hostname) return 0;
     
+    int cached;
+    if (dns_cache_lookup(hostname, &cached)) {
+        return cached;
+    }
+
     const char *p = hostname;
     int bloom_hit = 0;
     while (p) {
@@ -299,11 +306,9 @@ static int is_domain_blocked(const char *hostname) {
         p = strchr(p, '.');
         if (p) p++;
     }
-    if (!bloom_hit) return 0;
-    
-    int cached;
-    if (dns_cache_lookup(hostname, &cached)) {
-        return cached;
+    if (!bloom_hit) {
+        dns_cache_insert(hostname, 0);
+        return 0;
     }
     
     p = hostname;
@@ -347,12 +352,12 @@ static inline int search_domain(const RadixNode *root, const char *hostname) {
     return node->is_end;
 }
 
-static BOOL is_url_blocked(NSURL *url) {
+BOOL is_url_blocked(NSURL *url) {
     if (!url) return NO;
     NSString *host = url.host;
     if (!host) return NO;
-    const char *hostStr = [host UTF8String];
-    if (!hostStr) return NO;
+    char hostStr[MAX_DOMAIN_LENGTH] = {0};
+    strlcpy(hostStr, [host UTF8String], MAX_DOMAIN_LENGTH);
     return is_domain_blocked(hostStr) ? YES : NO;
 }
 
@@ -422,80 +427,8 @@ static int resolve_address_to_hostname(const struct sockaddr *addr, char *hostna
     pthread_mutex_unlock(&resolve_mutex);
     
     strlcpy(hostname, [canonName UTF8String], hostlen);
-    if (result) {
-        freeaddrinfo(result);
-    }
+    freeaddrinfo(result);
     return 1;
-}
-
-int my_getaddrinfo(const char *restrict node, const char *restrict service,
-                   const struct addrinfo *restrict hints,
-                   struct addrinfo **restrict res) {
-    if (node && is_domain_blocked(node)) {
-        struct addrinfo *dummy = malloc(sizeof(struct addrinfo));
-        if (!dummy) return EAI_MEMORY;
-        memset(dummy, 0, sizeof(struct addrinfo));
-        dummy->ai_family = AF_INET;
-        dummy->ai_socktype = SOCK_STREAM;
-        dummy->ai_protocol = IPPROTO_TCP;
-        dummy->ai_addrlen = sizeof(struct sockaddr_in);
-        struct sockaddr_in *addr = malloc(sizeof(struct sockaddr_in));
-        if (!addr) {
-            free(dummy);
-            return EAI_MEMORY;
-        }
-        memset(addr, 0, sizeof(struct sockaddr_in));
-        addr->sin_family = AF_INET;
-        addr->sin_port = 0;
-        addr->sin_addr.s_addr = htonl(0x7F000001);
-        dummy->ai_addr = (struct sockaddr *)addr;
-        dummy->ai_next = NULL;
-        *res = dummy;
-        return 0;
-    }
-    return orig_getaddrinfo(node, service, hints, res);
-}
-
-struct hostent *my_gethostbyname(const char *name) {
-    if (name && is_domain_blocked(name)) {
-        static struct hostent dummy;
-        static char *dummy_aliases[] = { NULL };
-        static char *dummy_addr_list[2];
-        static struct in_addr dummy_in_addr;
-        dummy_in_addr.s_addr = htonl(0x7F000001);
-        dummy_addr_list[0] = (char *)&dummy_in_addr;
-        dummy_addr_list[1] = NULL;
-        dummy.h_name = (char *)name;
-        dummy.h_aliases = dummy_aliases;
-        dummy.h_addrtype = AF_INET;
-        dummy.h_length = sizeof(struct in_addr);
-        dummy.h_addr_list = dummy_addr_list;
-        return &dummy;
-    }
-    return orig_gethostbyname(name);
-}
-
-struct hostent *my_gethostbyname2(const char *name, int af) {
-    if (name && is_domain_blocked(name)) {
-        if (af == AF_INET) {
-            static struct hostent dummy;
-            static char *dummy_aliases[] = { NULL };
-            static char *dummy_addr_list[2];
-            static struct in_addr dummy_in_addr;
-            dummy_in_addr.s_addr = htonl(0x7F000001);
-            dummy_addr_list[0] = (char *)&dummy_in_addr;
-            dummy_addr_list[1] = NULL;
-            dummy.h_name = (char *)name;
-            dummy.h_aliases = dummy_aliases;
-            dummy.h_addrtype = AF_INET;
-            dummy.h_length = sizeof(struct in_addr);
-            dummy.h_addr_list = dummy_addr_list;
-            return &dummy;
-        } else {
-            return NULL;
-        }
-    }
-    return orig_gethostbyname2(name);
 }
 
 int my_connect(int socket, const struct sockaddr *address, socklen_t address_len) {
@@ -510,6 +443,24 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
     return orig_connect(socket, address, address_len);
 }
 
+int my_connectx(int socket,
+                const struct sockaddr *local, socklen_t local_len,
+                const struct sockaddr *remote, socklen_t remote_len,
+                void *header, uint32_t header_size,
+                void *trailer, uint32_t trailer_size,
+                uint32_t flags) {
+    if (remote) {
+        char hostname[NI_MAXHOST] = {0};
+        if (resolve_address_to_hostname(remote, hostname, sizeof(hostname)) &&
+            is_domain_blocked(hostname)) {
+            errno = EHOSTUNREACH;
+            return -1;
+        }
+    }
+    return orig_connectx(socket, local, local_len, remote, remote_len,
+                         header, header_size, trailer, trailer_size, flags);
+}
+
 ssize_t my_sendto(int socket, const void *buffer, size_t length, int flags,
                   const struct sockaddr *dest_addr, socklen_t dest_len) {
     if (dest_addr) {
@@ -521,6 +472,91 @@ ssize_t my_sendto(int socket, const void *buffer, size_t length, int flags,
         }
     }
     return orig_sendto(socket, buffer, length, flags, dest_addr, dest_len);
+}
+
+ssize_t my_send(int sockfd, const void *buf, size_t len, int flags) {
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof(addr);
+    if (getpeername(sockfd, (struct sockaddr *)&addr, &addrlen) == 0) {
+        char hostname[NI_MAXHOST] = {0};
+        if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
+            if (is_domain_blocked(hostname)) {
+                errno = EHOSTUNREACH;
+                return -1;
+            }
+        }
+    }
+    return orig_send(sockfd, buf, len, flags);
+}
+
+ssize_t my_sendmsg(int sockfd, const struct msghdr *msg, int flags) {
+    if (msg && msg->msg_name) {
+        const struct sockaddr *dest = (const struct sockaddr *)msg->msg_name;
+        char hostname[NI_MAXHOST] = {0};
+        if (resolve_address_to_hostname(dest, hostname, sizeof(hostname))) {
+            if (is_domain_blocked(hostname)) {
+                errno = EHOSTUNREACH;
+                return -1;
+            }
+        }
+    } else {
+        struct sockaddr_storage addr;
+        socklen_t addrlen = sizeof(addr);
+        if (getpeername(sockfd, (struct sockaddr *)&addr, &addrlen) == 0) {
+            char hostname[NI_MAXHOST] = {0};
+            if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
+                if (is_domain_blocked(hostname)) {
+                    errno = EHOSTUNREACH;
+                    return -1;
+                }
+            }
+        }
+    }
+    return orig_sendmsg(sockfd, msg, flags);
+}
+
+ssize_t my_write(int fd, const void *buf, size_t count) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode)) {
+        struct sockaddr_storage addr;
+        socklen_t addrlen = sizeof(addr);
+        if (getpeername(fd, (struct sockaddr *)&addr, &addrlen) == 0) {
+            char hostname[NI_MAXHOST] = {0};
+            if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
+                if (is_domain_blocked(hostname)) {
+                    errno = EHOSTUNREACH;
+                    return -1;
+                }
+            }
+        }
+    }
+    return orig_write(fd, buf, count);
+}
+
+Boolean my_CFSocketConnectToAddress(CFSocketRef s, CFDataRef address) {
+    if (address) {
+        const struct sockaddr *addr = (const struct sockaddr *)CFDataGetBytePtr(address);
+        char hostname[NI_MAXHOST] = {0};
+        if (resolve_address_to_hostname(addr, hostname, sizeof(hostname))) {
+            if (is_domain_blocked(hostname)) {
+                return false;
+            }
+        }
+    }
+    return orig_CFSocketConnectToAddress(s, address);
+}
+
+CFSocketError my_CFSocketSendData(CFSocketRef s, CFDataRef address, CFDataRef data, double timeout) {
+    if (address) {
+        const struct sockaddr *addr = (const struct sockaddr *)CFDataGetBytePtr(address);
+        char hostname[NI_MAXHOST] = {0};
+        if (resolve_address_to_hostname(addr, hostname, sizeof(hostname))) {
+            if (is_domain_blocked(hostname)) {
+                return kCFSocketError;
+            }
+        }
+    }
+    return orig_CFSocketSendData(s, address, data, timeout);
 }
 
 DNSServiceErrorType my_DNSServiceQueryRecord(DNSServiceRef *sdRef,
@@ -552,7 +588,7 @@ CFNetServiceRef my_CFNetServiceCreate(CFAllocatorRef alloc,
             return orig_CFNetServiceCreate(alloc, dummyDomain, serviceType, name, port);
         }
     }
-     if (name) {
+    if (name) {
         CFStringToBuffer(name, nameBuf, MAX_DOMAIN_LENGTH);
         if (nameBuf[0] && is_domain_blocked(nameBuf)) {
             CFStringRef dummyDomain = CFSTR("127.0.0.1");
@@ -623,6 +659,19 @@ CFReadStreamRef my_CFStreamCreateForHTTPRequest(CFAllocatorRef alloc, CFHTTPMess
     return orig_CFStreamCreateForHTTPRequest(alloc, request);
 }
 
+void my_CFStreamCreatePairWithSocketToHost(CFAllocatorRef alloc, CFStringRef host, UInt32 port,
+                                           CFReadStreamRef  _Nullable *readStream,
+                                           CFWriteStreamRef _Nullable *writeStream) {
+    char hostBuf[MAX_DOMAIN_LENGTH] = {0};
+    CFStringToBuffer(host, hostBuf, MAX_DOMAIN_LENGTH);
+    if (hostBuf[0] && is_domain_blocked(hostBuf)) {
+        if (readStream) *readStream = NULL;
+        if (writeStream) *writeStream = NULL;
+        return;
+    }
+    orig_CFStreamCreatePairWithSocketToHost(alloc, host, port, readStream, writeStream);
+}
+
 CFHTTPMessageRef my_CFHTTPMessageCreateRequest(CFAllocatorRef alloc,
                                                CFStringRef requestMethod,
                                                CFURLRef url,
@@ -641,6 +690,39 @@ CFHTTPMessageRef my_CFHTTPMessageCreateRequest(CFAllocatorRef alloc,
     }
     return orig_CFHTTPMessageCreateRequest(alloc, requestMethod, url, httpVersion);
 }
+
+@interface AdblockURLProtocol : NSURLProtocol
+@end
+
+@implementation AdblockURLProtocol
+
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    if ([NSURLProtocol propertyForKey:@"AdblockHandled" inRequest:request]) {
+        return NO;
+    }
+    if (is_url_blocked(request.URL)) {
+        return YES;
+    }
+    return NO;
+}
+
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    return request;
+}
+
+- (void)startLoading {
+    NSMutableURLRequest *newRequest = [self.request mutableCopy];
+    [NSURLProtocol setProperty:@YES forKey:@"AdblockHandled" inRequest:newRequest];
+    NSError *error = [NSError errorWithDomain:NSURLErrorDomain
+                                         code:NSURLErrorCannotConnectToHost
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
+    [self.client URLProtocol:self didFailWithError:error];
+}
+
+- (void)stopLoading {
+}
+
+@end
 
 id my_NSNetServiceInitWithDomain(id self, SEL _cmd, id domain, id type, id name) {
     char domainBuf[MAX_DOMAIN_LENGTH] = {0};
@@ -714,6 +796,33 @@ id my_NSURLSessionDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) 
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDataTaskWithRequest)(self, _cmd, request);
 }
 
+id my_NSURLSessionDownloadTaskWithURL(id self, SEL _cmd, NSURL *url) {
+    if (is_url_blocked(url)) {
+        NSURLSessionDownloadTask *emptyTask = [self downloadTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+        return emptyTask;
+    }
+    return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionDownloadTaskWithURL)(self, _cmd, url);
+}
+id my_NSURLSessionDownloadTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    if (is_url_blocked(request.URL)) {
+        NSURLSessionDownloadTask *emptyTask = [self downloadTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+        return emptyTask;
+    }
+    return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDownloadTaskWithRequest)(self, _cmd, request);
+}
+
+static NSData* my_NSURLConnectionSendSynchronousRequest(Class self, SEL _cmd, NSURLRequest *request, NSURLResponse **response, NSError **error) {
+    if (is_url_blocked(request.URL)) {
+        if (error) {
+            *error = [NSError errorWithDomain:NSURLErrorDomain
+                                         code:NSURLErrorCannotConnectToHost
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
+        }
+        return nil;
+    }
+    return ((NSData* (*)(Class, SEL, NSURLRequest *, NSURLResponse **, NSError **))orig_NSURLConnectionSendSynchronousRequest)(self, _cmd, request, response, error);
+}
+
 void my_NSURLConnectionSendAsyncRequest(Class self, SEL _cmd, NSURLRequest *request,
                                        NSOperationQueue *queue,
                                        void (^completionHandler)(NSURLResponse*, NSData*, NSError*)) {
@@ -733,6 +842,20 @@ void my_NSURLConnectionSendAsyncRequest(Class self, SEL _cmd, NSURLRequest *requ
     }
     ((void (*)(Class, SEL, NSURLRequest *, NSOperationQueue *, void (^)(NSURLResponse*, NSData*, NSError*)))orig_NSURLConnectionSendAsynchronousRequest)
         (self, _cmd, request, queue, completionHandler);
+}
+
+id my_NSURLConnectionInitWithRequest(id self, SEL _cmd, NSURLRequest *request, id delegate) {
+    if (is_url_blocked(request.URL)) {
+        return nil;
+    }
+    return ((id (*)(id, SEL, NSURLRequest *, id))orig_NSURLConnectionInitWithRequest)(self, _cmd, request, delegate);
+}
+
+id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRequest *request, id delegate) {
+    if (is_url_blocked(request.URL)) {
+        return nil;
+    }
+    return ((id (*)(Class, SEL, NSURLRequest *, id))orig_NSURLConnectionConnectionWithRequestDelegate)(self, _cmd, request, delegate);
 }
 
 void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
@@ -785,15 +908,19 @@ __attribute__((constructor))
 static void adblock_init(void) {
     pthread_once(&init_once, initialize_once);
     struct rebinding rebindings[] = {
-        {"getaddrinfo", my_getaddrinfo, (void *)&orig_getaddrinfo},
-        {"gethostbyname", my_gethostbyname, (void *)&orig_gethostbyname},
-        {"gethostbyname2", my_gethostbyname2, (void *)&orig_gethostbyname2},
         {"connect", my_connect, (void *)&orig_connect},
+        {"connectx", my_connectx, (void *)&orig_connectx},
         {"sendto", my_sendto, (void *)&orig_sendto},
+        {"send", my_send, (void *)&orig_send},
+        {"sendmsg", my_sendmsg, (void *)&orig_sendmsg},
+        {"write", my_write, (void *)&orig_write},
+        {"CFSocketConnectToAddress", my_CFSocketConnectToAddress, (void *)&orig_CFSocketConnectToAddress},
+        {"CFSocketSendData", my_CFSocketSendData, (void *)&orig_CFSocketSendData},
         {"DNSServiceQueryRecord", my_DNSServiceQueryRecord, (void *)&orig_DNSServiceQueryRecord},
         {"CFNetServiceCreate", my_CFNetServiceCreate, (void *)&orig_CFNetServiceCreate},
         {"CFNetServiceSetClient", my_CFNetServiceSetClient, (void *)&orig_CFNetServiceSetClient},
         {"CFNetServiceResolveWithTimeout", my_CFNetServiceResolveWithTimeout, (void *)&orig_CFNetServiceResolveWithTimeout},
+        {"CFStreamCreatePairWithSocketToHost", my_CFStreamCreatePairWithSocketToHost, (void *)&orig_CFStreamCreatePairWithSocketToHost},
         {"CFStreamCreateForHTTPRequest", my_CFStreamCreateForHTTPRequest, (void *)&orig_CFStreamCreateForHTTPRequest},
         {"CFHTTPMessageCreateRequest", my_CFHTTPMessageCreateRequest, (void *)&orig_CFHTTPMessageCreateRequest}
     };
@@ -824,19 +951,38 @@ static void adblock_init(void) {
                      sel_registerName("dataTaskWithURL:"),
                      (IMP)my_NSURLSessionDataTaskWithURL,
                      &orig_NSURLSessionDataTaskWithURL);
-        
         swizzleMethod(urlSessionClass,
                      sel_registerName("dataTaskWithRequest:"),
                      (IMP)my_NSURLSessionDataTaskWithRequest,
                      &orig_NSURLSessionDataTaskWithRequest);
+        swizzleMethod(urlSessionClass,
+                     sel_registerName("downloadTaskWithURL:"),
+                     (IMP)my_NSURLSessionDownloadTaskWithURL,
+                     &orig_NSURLSessionDownloadTaskWithURL);
+        swizzleMethod(urlSessionClass,
+                     sel_registerName("downloadTaskWithRequest:"),
+                     (IMP)my_NSURLSessionDownloadTaskWithRequest,
+                     &orig_NSURLSessionDownloadTaskWithRequest);
     }
     
     Class urlConnectionClass = objc_getClass("NSURLConnection");
     if (urlConnectionClass) {
         swizzleClassMethod(urlConnectionClass,
+                          sel_registerName("sendSynchronousRequest:returningResponse:error:"),
+                          (IMP)my_NSURLConnectionSendSynchronousRequest,
+                          &orig_NSURLConnectionSendSynchronousRequest);
+        swizzleClassMethod(urlConnectionClass,
                           sel_registerName("sendAsynchronousRequest:queue:completionHandler:"),
                           (IMP)my_NSURLConnectionSendAsyncRequest,
                           &orig_NSURLConnectionSendAsynchronousRequest);
+        swizzleMethod(urlConnectionClass,
+                          sel_registerName("initWithRequest:delegate:"),
+                          (IMP)my_NSURLConnectionInitWithRequest,
+                          &orig_NSURLConnectionInitWithRequest);
+        swizzleClassMethod(urlConnectionClass,
+                          sel_registerName("connectionWithRequest:delegate:"),
+                          (IMP)my_NSURLConnectionConnectionWithRequestDelegate,
+                          &orig_NSURLConnectionConnectionWithRequestDelegate);
     }
     
     Class uiWebViewClass = objc_getClass("UIWebView");
@@ -854,6 +1000,10 @@ static void adblock_init(void) {
                       (IMP)my_WKWebViewLoadRequest,
                       &orig_WKWebViewLoadRequest);
     }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSURLProtocol registerClass:[AdblockURLProtocol class]];
+    });
 }
 
 __attribute__((destructor))
