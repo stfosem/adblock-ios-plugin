@@ -61,14 +61,6 @@ static ssize_t (*orig_sendmsg)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*orig_write)(int, const void *, size_t) = NULL;
 static Boolean (*orig_CFSocketConnectToAddress)(CFSocketRef, CFDataRef) = NULL;
 static CFSocketError (*orig_CFSocketSendData)(CFSocketRef, CFDataRef, CFDataRef, double) = NULL;
-static DNSServiceErrorType (*orig_DNSServiceQueryRecord)(DNSServiceRef *sdRef,
-                                                         DNSServiceFlags flags,
-                                                         uint32_t interfaceIndex,
-                                                         const char *fullname,
-                                                         uint16_t rrtype,
-                                                         uint16_t rrclass,
-                                                         DNSServiceQueryRecordReply callBack,
-                                                         void *context) = NULL;
 static Boolean (*orig_CFNetServiceSetClient)(CFNetServiceRef theService,
                                              CFNetServiceClientCallBack clientCB,
                                              CFNetServiceClientContext *clientContext) = NULL;
@@ -92,15 +84,25 @@ static IMP orig_NSNetServiceInitWithDomain = NULL;
 static IMP orig_NSNetServiceInitWithDomainService = NULL;
 static IMP orig_NSNetServiceResolve = NULL;
 static IMP orig_NSURLSessionDataTaskWithURL = NULL;
+static IMP orig_NSURLSessionDataTaskWithURLCompletion = NULL;
 static IMP orig_NSURLSessionDataTaskWithRequest = NULL;
+static IMP orig_NSURLSessionDataTaskWithRequestCompletion = NULL;
+static IMP orig_NSURLSessionDownloadTaskWithURL = NULL;
+static IMP orig_NSURLSessionDownloadTaskWithRequest = NULL;
+static IMP orig_NSURLSessionUploadTaskWithRequestFromFile = NULL;
+static IMP orig_NSURLSessionUploadTaskWithRequestFromData = NULL;
+static IMP orig_NSURLSessionUploadTaskWithStreamedRequest = NULL;
+static IMP orig_NSURLSessionStreamTaskWithHostNamePort = NULL;
+static IMP orig_NSURLSessionStreamTaskWithNetService = NULL;
+static IMP orig_NSURLSessionWebSocketTaskWithURL = NULL;
+static IMP orig_NSURLSessionWebSocketTaskWithURLProtocols = NULL;
 static IMP orig_NSURLConnectionSendSynchronousRequest = NULL;
 static IMP orig_NSURLConnectionSendAsynchronousRequest = NULL;
 static IMP orig_NSURLConnectionInitWithRequest = NULL;
+static IMP orig_NSURLConnectionInitWithRequestStartImmediately = NULL;
 static IMP orig_NSURLConnectionConnectionWithRequestDelegate = NULL;
 static IMP orig_UIWebViewLoadRequest = NULL;
 static IMP orig_WKWebViewLoadRequest = NULL;
-static IMP orig_NSURLSessionDownloadTaskWithURL = NULL;
-static IMP orig_NSURLSessionDownloadTaskWithRequest = NULL;
 
 static inline void CFStringToBuffer(CFStringRef string, char *buffer, size_t bufferSize) {
     if (string && buffer && bufferSize > 0) {
@@ -559,21 +561,6 @@ CFSocketError my_CFSocketSendData(CFSocketRef s, CFDataRef address, CFDataRef da
     return orig_CFSocketSendData(s, address, data, timeout);
 }
 
-DNSServiceErrorType my_DNSServiceQueryRecord(DNSServiceRef *sdRef,
-                                             DNSServiceFlags flags,
-                                             uint32_t interfaceIndex,
-                                             const char *fullname,
-                                             uint16_t rrtype,
-                                             uint16_t rrclass,
-                                             DNSServiceQueryRecordReply callBack,
-                                             void *context) {
-    if (fullname && is_domain_blocked(fullname)) {
-        return kDNSServiceErr_NoError;
-    }
-    return orig_DNSServiceQueryRecord(sdRef, flags, interfaceIndex, fullname,
-                                      rrtype, rrclass, callBack, context);
-}
-
 CFNetServiceRef my_CFNetServiceCreate(CFAllocatorRef alloc,
                                       CFStringRef domain,
                                       CFStringRef serviceType,
@@ -691,39 +678,6 @@ CFHTTPMessageRef my_CFHTTPMessageCreateRequest(CFAllocatorRef alloc,
     return orig_CFHTTPMessageCreateRequest(alloc, requestMethod, url, httpVersion);
 }
 
-@interface AdblockURLProtocol : NSURLProtocol
-@end
-
-@implementation AdblockURLProtocol
-
-+ (BOOL)canInitWithRequest:(NSURLRequest *)request {
-    if ([NSURLProtocol propertyForKey:@"AdblockHandled" inRequest:request]) {
-        return NO;
-    }
-    if (is_url_blocked(request.URL)) {
-        return YES;
-    }
-    return NO;
-}
-
-+ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
-    return request;
-}
-
-- (void)startLoading {
-    NSMutableURLRequest *newRequest = [self.request mutableCopy];
-    [NSURLProtocol setProperty:@YES forKey:@"AdblockHandled" inRequest:newRequest];
-    NSError *error = [NSError errorWithDomain:NSURLErrorDomain
-                                         code:NSURLErrorCannotConnectToHost
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
-    [self.client URLProtocol:self didFailWithError:error];
-}
-
-- (void)stopLoading {
-}
-
-@end
-
 id my_NSNetServiceInitWithDomain(id self, SEL _cmd, id domain, id type, id name) {
     char domainBuf[MAX_DOMAIN_LENGTH] = {0};
     char nameBuf[MAX_DOMAIN_LENGTH] = {0};
@@ -788,12 +742,42 @@ id my_NSURLSessionDataTaskWithURL(id self, SEL _cmd, NSURL *url) {
     return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionDataTaskWithURL)(self, _cmd, url);
 }
 
+id my_NSURLSessionDataTaskWithURLCompletion(id self, SEL _cmd, NSURL *url, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+    if (is_url_blocked(url)) {
+        if (completionHandler) {
+            NSError *error = [NSError errorWithDomain:NSURLErrorDomain
+                                                 code:NSURLErrorCannotConnectToHost
+                                             userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionHandler(nil, nil, error);
+            });
+        }
+        return [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+    }
+    return ((id (*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_NSURLSessionDataTaskWithURLCompletion)(self, _cmd, url, completionHandler);
+}
+
 id my_NSURLSessionDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         NSURLSessionDataTask *emptyTask = [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
         return emptyTask;
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDataTaskWithRequest)(self, _cmd, request);
+}
+
+id my_NSURLSessionDataTaskWithRequestCompletion(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+    if (is_url_blocked(request.URL)) {
+        if (completionHandler) {
+            NSError *error = [NSError errorWithDomain:NSURLErrorDomain
+                                                 code:NSURLErrorCannotConnectToHost
+                                             userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionHandler(nil, nil, error);
+            });
+        }
+        return [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+    }
+    return ((id (*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_NSURLSessionDataTaskWithRequestCompletion)(self, _cmd, request, completionHandler);
 }
 
 id my_NSURLSessionDownloadTaskWithURL(id self, SEL _cmd, NSURL *url) {
@@ -809,6 +793,67 @@ id my_NSURLSessionDownloadTaskWithRequest(id self, SEL _cmd, NSURLRequest *reque
         return emptyTask;
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDownloadTaskWithRequest)(self, _cmd, request);
+}
+
+id my_NSURLSessionUploadTaskWithRequestFromFile(id self, SEL _cmd, NSURLRequest *request, NSURL *fileURL) {
+    if (is_url_blocked(request.URL)) {
+        return [self uploadTaskWithRequest:request fromFile:[NSURL fileURLWithPath:@"/dev/null"]];
+    }
+    return ((id (*)(id, SEL, NSURLRequest *, NSURL *))orig_NSURLSessionUploadTaskWithRequestFromFile)(self, _cmd, request, fileURL);
+}
+
+id my_NSURLSessionUploadTaskWithRequestFromData(id self, SEL _cmd, NSURLRequest *request, NSData *bodyData) {
+    if (is_url_blocked(request.URL)) {
+        return [self uploadTaskWithRequest:request fromData:[NSData data]];
+    }
+    return ((id (*)(id, SEL, NSURLRequest *, NSData *))orig_NSURLSessionUploadTaskWithRequestFromData)(self, _cmd, request, bodyData);
+}
+
+id my_NSURLSessionUploadTaskWithStreamedRequest(id self, SEL _cmd, NSURLRequest *request) {
+    if (is_url_blocked(request.URL)) {
+        return nil;
+    }
+    return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionUploadTaskWithStreamedRequest)(self, _cmd, request);
+}
+
+id my_NSURLSessionStreamTaskWithHostNamePort(id self, SEL _cmd, NSString *hostname, NSInteger port) {
+    if (hostname && is_domain_blocked([hostname UTF8String])) {
+        return nil;
+    }
+    return ((id (*)(id, SEL, NSString *, NSInteger))orig_NSURLSessionStreamTaskWithHostNamePort)(self, _cmd, hostname, port);
+}
+
+id my_NSURLSessionStreamTaskWithNetService(id self, SEL _cmd, NSNetService *service) {
+    if (service) {
+        NSString *domain = [service domain];
+        NSString *name = [service name];
+        char domainBuf[MAX_DOMAIN_LENGTH] = {0};
+        char nameBuf[MAX_DOMAIN_LENGTH] = {0};
+        if (domain) {
+            CFStringToBuffer((CFStringRef)domain, domainBuf, MAX_DOMAIN_LENGTH);
+        }
+        if (name) {
+            CFStringToBuffer((CFStringRef)name, nameBuf, MAX_DOMAIN_LENGTH);
+        }
+        if ((domainBuf[0] && is_domain_blocked(domainBuf)) || (nameBuf[0] && is_domain_blocked(nameBuf))) {
+            return nil;
+        }
+    }
+    return ((id (*)(id, SEL, NSNetService *))orig_NSURLSessionStreamTaskWithNetService)(self, _cmd, service);
+}
+
+id my_NSURLSessionWebSocketTaskWithURL(id self, SEL _cmd, NSURL *url) {
+    if (is_url_blocked(url)) {
+        return [self webSocketTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+    }
+    return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionWebSocketTaskWithURL)(self, _cmd, url);
+}
+
+id my_NSURLSessionWebSocketTaskWithURLProtocols(id self, SEL _cmd, NSURL *url, NSArray *protocols) {
+    if (is_url_blocked(url)) {
+        return [self webSocketTaskWithURL:[NSURL URLWithString:@"about:blank"] protocols:protocols];
+    }
+    return ((id (*)(id, SEL, NSURL *, NSArray *))orig_NSURLSessionWebSocketTaskWithURLProtocols)(self, _cmd, url, protocols);
 }
 
 static NSData* my_NSURLConnectionSendSynchronousRequest(Class self, SEL _cmd, NSURLRequest *request, NSURLResponse **response, NSError **error) {
@@ -849,6 +894,13 @@ id my_NSURLConnectionInitWithRequest(id self, SEL _cmd, NSURLRequest *request, i
         return nil;
     }
     return ((id (*)(id, SEL, NSURLRequest *, id))orig_NSURLConnectionInitWithRequest)(self, _cmd, request, delegate);
+}
+
+id my_NSURLConnectionInitWithRequestStartImmediately(id self, SEL _cmd, NSURLRequest *request, id delegate, BOOL startImmediately) {
+    if (is_url_blocked(request.URL)) {
+        return nil;
+    }
+    return ((id (*)(id, SEL, NSURLRequest *, id, BOOL))orig_NSURLConnectionInitWithRequestStartImmediately)(self, _cmd, request, delegate, startImmediately);
 }
 
 id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRequest *request, id delegate) {
@@ -916,7 +968,6 @@ static void adblock_init(void) {
         {"write", my_write, (void *)&orig_write},
         {"CFSocketConnectToAddress", my_CFSocketConnectToAddress, (void *)&orig_CFSocketConnectToAddress},
         {"CFSocketSendData", my_CFSocketSendData, (void *)&orig_CFSocketSendData},
-        {"DNSServiceQueryRecord", my_DNSServiceQueryRecord, (void *)&orig_DNSServiceQueryRecord},
         {"CFNetServiceCreate", my_CFNetServiceCreate, (void *)&orig_CFNetServiceCreate},
         {"CFNetServiceSetClient", my_CFNetServiceSetClient, (void *)&orig_CFNetServiceSetClient},
         {"CFNetServiceResolveWithTimeout", my_CFNetServiceResolveWithTimeout, (void *)&orig_CFNetServiceResolveWithTimeout},
@@ -952,9 +1003,17 @@ static void adblock_init(void) {
                      (IMP)my_NSURLSessionDataTaskWithURL,
                      &orig_NSURLSessionDataTaskWithURL);
         swizzleMethod(urlSessionClass,
+                      sel_registerName("dataTaskWithURL:completionHandler:"),
+                      (IMP)my_NSURLSessionDataTaskWithURLCompletion,
+                      &orig_NSURLSessionDataTaskWithURLCompletion);
+        swizzleMethod(urlSessionClass,
                      sel_registerName("dataTaskWithRequest:"),
                      (IMP)my_NSURLSessionDataTaskWithRequest,
                      &orig_NSURLSessionDataTaskWithRequest);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("dataTaskWithRequest:completionHandler:"),
+                      (IMP)my_NSURLSessionDataTaskWithRequestCompletion,
+                      &orig_NSURLSessionDataTaskWithRequestCompletion);
         swizzleMethod(urlSessionClass,
                      sel_registerName("downloadTaskWithURL:"),
                      (IMP)my_NSURLSessionDownloadTaskWithURL,
@@ -963,6 +1022,34 @@ static void adblock_init(void) {
                      sel_registerName("downloadTaskWithRequest:"),
                      (IMP)my_NSURLSessionDownloadTaskWithRequest,
                      &orig_NSURLSessionDownloadTaskWithRequest);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("uploadTaskWithRequest:fromFile:"),
+                      (IMP)my_NSURLSessionUploadTaskWithRequestFromFile,
+                      &orig_NSURLSessionUploadTaskWithRequestFromFile);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("uploadTaskWithRequest:fromData:"),
+                      (IMP)my_NSURLSessionUploadTaskWithRequestFromData,
+                      &orig_NSURLSessionUploadTaskWithRequestFromData);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("uploadTaskWithStreamedRequest:"),
+                      (IMP)my_NSURLSessionUploadTaskWithStreamedRequest,
+                      &orig_NSURLSessionUploadTaskWithStreamedRequest);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("streamTaskWithHostName:port:"),
+                      (IMP)my_NSURLSessionStreamTaskWithHostNamePort,
+                      &orig_NSURLSessionStreamTaskWithHostNamePort);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("streamTaskWithNetService:"),
+                      (IMP)my_NSURLSessionStreamTaskWithNetService,
+                      &orig_NSURLSessionStreamTaskWithNetService);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("webSocketTaskWithURL:"),
+                      (IMP)my_NSURLSessionWebSocketTaskWithURL,
+                      &orig_NSURLSessionWebSocketTaskWithURL);
+        swizzleMethod(urlSessionClass,
+                      sel_registerName("webSocketTaskWithURL:protocols:"),
+                      (IMP)my_NSURLSessionWebSocketTaskWithURLProtocols,
+                      &orig_NSURLSessionWebSocketTaskWithURLProtocols);
     }
     
     Class urlConnectionClass = objc_getClass("NSURLConnection");
@@ -979,6 +1066,10 @@ static void adblock_init(void) {
                           sel_registerName("initWithRequest:delegate:"),
                           (IMP)my_NSURLConnectionInitWithRequest,
                           &orig_NSURLConnectionInitWithRequest);
+        swizzleMethod(urlConnectionClass,
+                          sel_registerName("initWithRequest:delegate:startImmediately:"),
+                          (IMP)my_NSURLConnectionInitWithRequestStartImmediately,
+                          &orig_NSURLConnectionInitWithRequestStartImmediately);
         swizzleClassMethod(urlConnectionClass,
                           sel_registerName("connectionWithRequest:delegate:"),
                           (IMP)my_NSURLConnectionConnectionWithRequestDelegate,
@@ -1000,10 +1091,6 @@ static void adblock_init(void) {
                       (IMP)my_WKWebViewLoadRequest,
                       &orig_WKWebViewLoadRequest);
     }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [NSURLProtocol registerClass:[AdblockURLProtocol class]];
-    });
 }
 
 __attribute__((destructor))
