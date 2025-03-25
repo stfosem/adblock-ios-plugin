@@ -174,7 +174,7 @@ static void dns_cache_init(void) {
     for (int i = 0; i < CACHE_MUTEX_COUNT; i++) {
         pthread_mutex_init(&cache_mutex[i], NULL);
     }
-    lookup_queue = dispatch_queue_create("net.gammesofts.ios.adblock.lookup", DISPATCH_QUEUE_CONCURRENT);
+    lookup_queue = dispatch_queue_create("com.gamesofts.ios.adblock.lookup", DISPATCH_QUEUE_CONCURRENT);
 }
 
 static int dns_cache_lookup(const char *domain, int *blocked) {
@@ -571,15 +571,13 @@ CFNetServiceRef my_CFNetServiceCreate(CFAllocatorRef alloc,
     if (domain) {
         CFStringToBuffer(domain, domainBuf, MAX_DOMAIN_LENGTH);
         if (domainBuf[0] && is_domain_blocked(domainBuf)) {
-            CFStringRef dummyDomain = CFSTR("127.0.0.1");
-            return orig_CFNetServiceCreate(alloc, dummyDomain, serviceType, name, port);
+            return NULL;
         }
     }
     if (name) {
         CFStringToBuffer(name, nameBuf, MAX_DOMAIN_LENGTH);
         if (nameBuf[0] && is_domain_blocked(nameBuf)) {
-            CFStringRef dummyDomain = CFSTR("127.0.0.1");
-            return orig_CFNetServiceCreate(alloc, dummyDomain, serviceType, name, port);
+            return NULL;
         }
     }
     return orig_CFNetServiceCreate(alloc, domain, serviceType, name, port);
@@ -618,7 +616,7 @@ Boolean my_CFNetServiceResolveWithTimeout(CFNetServiceRef theService,
         if (domain) {
             CFStringToBuffer(domain, domainBuf, MAX_DOMAIN_LENGTH);
             if (domainBuf[0] && is_domain_blocked(domainBuf)) {
-                return true;
+                return false;
             }
         }
     }
@@ -797,28 +795,34 @@ id my_NSURLSessionDownloadTaskWithRequest(id self, SEL _cmd, NSURLRequest *reque
 
 id my_NSURLSessionUploadTaskWithRequestFromFile(id self, SEL _cmd, NSURLRequest *request, NSURL *fileURL) {
     if (is_url_blocked(request.URL)) {
-        return [self uploadTaskWithRequest:request fromFile:[NSURL fileURLWithPath:@"/dev/null"]];
+        NSMutableURLRequest *dummyRequest = [request mutableCopy];
+        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
+        return ((id (*)(id, SEL, NSURLRequest *, NSURL *))orig_NSURLSessionUploadTaskWithRequestFromFile)(self, _cmd, dummyRequest, fileURL);
     }
     return ((id (*)(id, SEL, NSURLRequest *, NSURL *))orig_NSURLSessionUploadTaskWithRequestFromFile)(self, _cmd, request, fileURL);
 }
 
 id my_NSURLSessionUploadTaskWithRequestFromData(id self, SEL _cmd, NSURLRequest *request, NSData *bodyData) {
     if (is_url_blocked(request.URL)) {
-        return [self uploadTaskWithRequest:request fromData:[NSData data]];
+        NSMutableURLRequest *dummyRequest = [request mutableCopy];
+        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
+        return ((id (*)(id, SEL, NSURLRequest *, NSData *))orig_NSURLSessionUploadTaskWithRequestFromData)(self, _cmd, dummyRequest, bodyData);
     }
     return ((id (*)(id, SEL, NSURLRequest *, NSData *))orig_NSURLSessionUploadTaskWithRequestFromData)(self, _cmd, request, bodyData);
 }
 
 id my_NSURLSessionUploadTaskWithStreamedRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        return nil;
+        NSMutableURLRequest *dummyRequest = [request mutableCopy];
+        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
+        return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionUploadTaskWithStreamedRequest)(self, _cmd, dummyRequest);
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionUploadTaskWithStreamedRequest)(self, _cmd, request);
 }
 
 id my_NSURLSessionStreamTaskWithHostNamePort(id self, SEL _cmd, NSString *hostname, NSInteger port) {
     if (hostname && is_domain_blocked([hostname UTF8String])) {
-        return nil;
+        return ((id (*)(id, SEL, NSString *, NSInteger))orig_NSURLSessionStreamTaskWithHostNamePort)(self, _cmd, @"localhost", port);
     }
     return ((id (*)(id, SEL, NSString *, NSInteger))orig_NSURLSessionStreamTaskWithHostNamePort)(self, _cmd, hostname, port);
 }
@@ -829,14 +833,11 @@ id my_NSURLSessionStreamTaskWithNetService(id self, SEL _cmd, NSNetService *serv
         NSString *name = [service name];
         char domainBuf[MAX_DOMAIN_LENGTH] = {0};
         char nameBuf[MAX_DOMAIN_LENGTH] = {0};
-        if (domain) {
-            CFStringToBuffer((CFStringRef)domain, domainBuf, MAX_DOMAIN_LENGTH);
-        }
-        if (name) {
-            CFStringToBuffer((CFStringRef)name, nameBuf, MAX_DOMAIN_LENGTH);
-        }
+        if (domain) CFStringToBuffer((CFStringRef)domain, domainBuf, MAX_DOMAIN_LENGTH);
+        if (name) CFStringToBuffer((CFStringRef)name, nameBuf, MAX_DOMAIN_LENGTH);
         if ((domainBuf[0] && is_domain_blocked(domainBuf)) || (nameBuf[0] && is_domain_blocked(nameBuf))) {
-            return nil;
+            NSNetService *dummyService = [[NSNetService alloc] initWithDomain:@"local." type:@"_dummy._tcp." name:@"dummy" port:80];
+            return ((id (*)(id, SEL, NSNetService *))orig_NSURLSessionStreamTaskWithNetService)(self, _cmd, dummyService);
         }
     }
     return ((id (*)(id, SEL, NSNetService *))orig_NSURLSessionStreamTaskWithNetService)(self, _cmd, service);
