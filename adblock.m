@@ -61,24 +61,12 @@ static ssize_t (*orig_sendmsg)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*orig_write)(int, const void *, size_t) = NULL;
 static Boolean (*orig_CFSocketConnectToAddress)(CFSocketRef, CFDataRef) = NULL;
 static CFSocketError (*orig_CFSocketSendData)(CFSocketRef, CFDataRef, CFDataRef, double) = NULL;
-static Boolean (*orig_CFNetServiceSetClient)(CFNetServiceRef theService,
-                                             CFNetServiceClientCallBack clientCB,
-                                             CFNetServiceClientContext *clientContext) = NULL;
-static CFNetServiceRef (*orig_CFNetServiceCreate)(CFAllocatorRef alloc,
-                                                 CFStringRef domain,
-                                                 CFStringRef serviceType,
-                                                 CFStringRef name,
-                                                 SInt32 port) = NULL;
-static Boolean (*orig_CFNetServiceResolveWithTimeout)(CFNetServiceRef theService,
-                                                      CFTimeInterval timeout,
-                                                      CFStreamError *error) = NULL;
+static Boolean (*orig_CFNetServiceSetClient)(CFNetServiceRef, CFNetServiceClientCallBack, CFNetServiceClientContext *) = NULL;
+static CFNetServiceRef (*orig_CFNetServiceCreate)(CFAllocatorRef, CFStringRef, CFStringRef, CFStringRef, SInt32) = NULL;
+static Boolean (*orig_CFNetServiceResolveWithTimeout)(CFNetServiceRef, CFTimeInterval, CFStreamError *) = NULL;
 static void (*orig_CFStreamCreatePairWithSocketToHost)(CFAllocatorRef, CFStringRef, UInt32, CFReadStreamRef _Nullable *, CFWriteStreamRef _Nullable *) = NULL;
-static CFReadStreamRef (*orig_CFStreamCreateForHTTPRequest)(CFAllocatorRef alloc,
-                                                           CFHTTPMessageRef request) = NULL;
-static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(CFAllocatorRef alloc,
-                                                          CFStringRef requestMethod,
-                                                          CFURLRef url,
-                                                          CFStringRef httpVersion) = NULL;
+static CFReadStreamRef (*orig_CFStreamCreateForHTTPRequest)(CFAllocatorRef, CFHTTPMessageRef) = NULL;
+static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef) = NULL;
 
 static IMP orig_NSNetServiceInitWithDomain = NULL;
 static IMP orig_NSNetServiceInitWithDomainService = NULL;
@@ -109,7 +97,7 @@ static inline void CFStringToBuffer(CFStringRef string, char *buffer, size_t buf
         if (!CFStringGetCString(string, buffer, bufferSize, kCFStringEncodingUTF8)) {
             buffer[0] = '\0';
         }
-    } else if(buffer && bufferSize > 0) {
+    } else if (buffer && bufferSize > 0) {
         buffer[0] = '\0';
     }
 }
@@ -174,7 +162,7 @@ static void dns_cache_init(void) {
     for (int i = 0; i < CACHE_MUTEX_COUNT; i++) {
         pthread_mutex_init(&cache_mutex[i], NULL);
     }
-    lookup_queue = dispatch_queue_create("com.gamesofts.ios.adblock.lookup", DISPATCH_QUEUE_CONCURRENT);
+    lookup_queue = dispatch_queue_create("com.gammesofts.ios.adblock.lookup", DISPATCH_QUEUE_CONCURRENT);
 }
 
 static int dns_cache_lookup(const char *domain, int *blocked) {
@@ -222,7 +210,34 @@ static void dns_cache_insert(const char *domain, int blocked) {
     pthread_mutex_unlock(&cache_mutex[mutex_idx]);
 }
 
-static inline int search_domain(const RadixNode *root, const char *hostname);
+__attribute__((always_inline))
+static inline int search_domain(const RadixNode *root, const char *hostname) {
+    if (!root || !hostname) return 0;
+    int len = (int)strlen(hostname);
+    const RadixNode *node = root;
+    for (int i = len - 1; i >= 0; i--) {
+        unsigned char c = (unsigned char)tolower(hostname[i]);
+        const RadixNode *child = NULL;
+        for (int j = 0; j < node->childCount; j++) {
+            if (node->children[j].c == c) {
+                child = node->children[j].child;
+                break;
+            }
+        }
+        if (!child) {
+            if (c == '.' && node->is_end) {
+                return 1;
+            }
+            return 0;
+        }
+        node = child;
+        if (node->is_end && (i == 0 || hostname[i - 1] == '.')) {
+            return 1;
+        }
+    }
+    return node->is_end;
+}
+
 static RadixNode *create_radix_node(void) {
     RadixNode *node = calloc(1, sizeof(RadixNode));
     return node;
@@ -325,33 +340,6 @@ static int is_domain_blocked(const char *hostname) {
     }
     dns_cache_insert(hostname, blocked);
     return blocked;
-}
-
-static inline int search_domain(const RadixNode *root, const char *hostname) {
-    if (!root || !hostname) return 0;
-    int len = (int)strlen(hostname);
-    const RadixNode *node = root;
-    for (int i = len - 1; i >= 0; i--) {
-        unsigned char c = (unsigned char)tolower(hostname[i]);
-        const RadixNode *child = NULL;
-        for (int j = 0; j < node->childCount; j++) {
-            if (node->children[j].c == c) {
-                child = node->children[j].child;
-                break;
-            }
-        }
-        if (!child) {
-            if (c == '.' && node->is_end) {
-                return 1;
-            }
-            return 0;
-        }
-        node = child;
-        if (node->is_end && (i == 0 || hostname[i - 1] == '.')) {
-            return 1;
-        }
-    }
-    return node->is_end;
 }
 
 BOOL is_url_blocked(NSURL *url) {
@@ -732,10 +720,31 @@ void my_NSNetServiceResolve(id self, SEL _cmd) {
     ((void (*)(id, SEL))orig_NSNetServiceResolve)(self, _cmd);
 }
 
+static void blocked_task_resume(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+}
+
+static void blocked_task_cancel(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+}
+
+static id createBlockedURLSessionTask(void) {
+    static Class BlockedURLSessionTaskClass = Nil;
+    if (!BlockedURLSessionTaskClass) {
+        BlockedURLSessionTaskClass = objc_allocateClassPair([NSURLSessionDataTask class], "BlockedURLSessionTask", 0);
+        class_addMethod(BlockedURLSessionTaskClass, @selector(resume), (IMP)blocked_task_resume, "v@:");
+        class_addMethod(BlockedURLSessionTaskClass, @selector(cancel), (IMP)blocked_task_cancel, "v@:");
+        objc_registerClassPair(BlockedURLSessionTaskClass);
+    }
+    id task = [[BlockedURLSessionTaskClass alloc] init];
+    return task;
+}
+
 id my_NSURLSessionDataTaskWithURL(id self, SEL _cmd, NSURL *url) {
     if (is_url_blocked(url)) {
-        NSURLSessionDataTask *emptyTask = [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
-        return emptyTask;
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionDataTaskWithURL)(self, _cmd, url);
 }
@@ -750,15 +759,14 @@ id my_NSURLSessionDataTaskWithURLCompletion(id self, SEL _cmd, NSURL *url, void 
                 completionHandler(nil, nil, error);
             });
         }
-        return [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_NSURLSessionDataTaskWithURLCompletion)(self, _cmd, url, completionHandler);
 }
 
 id my_NSURLSessionDataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        NSURLSessionDataTask *emptyTask = [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
-        return emptyTask;
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDataTaskWithRequest)(self, _cmd, request);
 }
@@ -773,56 +781,49 @@ id my_NSURLSessionDataTaskWithRequestCompletion(id self, SEL _cmd, NSURLRequest 
                 completionHandler(nil, nil, error);
             });
         }
-        return [self dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_NSURLSessionDataTaskWithRequestCompletion)(self, _cmd, request, completionHandler);
 }
 
 id my_NSURLSessionDownloadTaskWithURL(id self, SEL _cmd, NSURL *url) {
     if (is_url_blocked(url)) {
-        NSURLSessionDownloadTask *emptyTask = [self downloadTaskWithURL:[NSURL URLWithString:@"about:blank"]];
-        return emptyTask;
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionDownloadTaskWithURL)(self, _cmd, url);
 }
+
 id my_NSURLSessionDownloadTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        NSURLSessionDownloadTask *emptyTask = [self downloadTaskWithURL:[NSURL URLWithString:@"about:blank"]];
-        return emptyTask;
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionDownloadTaskWithRequest)(self, _cmd, request);
 }
 
 id my_NSURLSessionUploadTaskWithRequestFromFile(id self, SEL _cmd, NSURLRequest *request, NSURL *fileURL) {
     if (is_url_blocked(request.URL)) {
-        NSMutableURLRequest *dummyRequest = [request mutableCopy];
-        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
-        return ((id (*)(id, SEL, NSURLRequest *, NSURL *))orig_NSURLSessionUploadTaskWithRequestFromFile)(self, _cmd, dummyRequest, fileURL);
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *, NSURL *))orig_NSURLSessionUploadTaskWithRequestFromFile)(self, _cmd, request, fileURL);
 }
 
 id my_NSURLSessionUploadTaskWithRequestFromData(id self, SEL _cmd, NSURLRequest *request, NSData *bodyData) {
     if (is_url_blocked(request.URL)) {
-        NSMutableURLRequest *dummyRequest = [request mutableCopy];
-        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
-        return ((id (*)(id, SEL, NSURLRequest *, NSData *))orig_NSURLSessionUploadTaskWithRequestFromData)(self, _cmd, dummyRequest, bodyData);
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *, NSData *))orig_NSURLSessionUploadTaskWithRequestFromData)(self, _cmd, request, bodyData);
 }
 
 id my_NSURLSessionUploadTaskWithStreamedRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        NSMutableURLRequest *dummyRequest = [request mutableCopy];
-        dummyRequest.URL = [NSURL URLWithString:@"about:blank"];
-        return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionUploadTaskWithStreamedRequest)(self, _cmd, dummyRequest);
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURLRequest *))orig_NSURLSessionUploadTaskWithStreamedRequest)(self, _cmd, request);
 }
 
 id my_NSURLSessionStreamTaskWithHostNamePort(id self, SEL _cmd, NSString *hostname, NSInteger port) {
     if (hostname && is_domain_blocked([hostname UTF8String])) {
-        return ((id (*)(id, SEL, NSString *, NSInteger))orig_NSURLSessionStreamTaskWithHostNamePort)(self, _cmd, @"localhost", port);
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSString *, NSInteger))orig_NSURLSessionStreamTaskWithHostNamePort)(self, _cmd, hostname, port);
 }
@@ -836,8 +837,7 @@ id my_NSURLSessionStreamTaskWithNetService(id self, SEL _cmd, NSNetService *serv
         if (domain) CFStringToBuffer((CFStringRef)domain, domainBuf, MAX_DOMAIN_LENGTH);
         if (name) CFStringToBuffer((CFStringRef)name, nameBuf, MAX_DOMAIN_LENGTH);
         if ((domainBuf[0] && is_domain_blocked(domainBuf)) || (nameBuf[0] && is_domain_blocked(nameBuf))) {
-            NSNetService *dummyService = [[NSNetService alloc] initWithDomain:@"local." type:@"_dummy._tcp." name:@"dummy" port:80];
-            return ((id (*)(id, SEL, NSNetService *))orig_NSURLSessionStreamTaskWithNetService)(self, _cmd, dummyService);
+            return createBlockedURLSessionTask();
         }
     }
     return ((id (*)(id, SEL, NSNetService *))orig_NSURLSessionStreamTaskWithNetService)(self, _cmd, service);
@@ -845,14 +845,14 @@ id my_NSURLSessionStreamTaskWithNetService(id self, SEL _cmd, NSNetService *serv
 
 id my_NSURLSessionWebSocketTaskWithURL(id self, SEL _cmd, NSURL *url) {
     if (is_url_blocked(url)) {
-        return [self webSocketTaskWithURL:[NSURL URLWithString:@"about:blank"]];
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURL *))orig_NSURLSessionWebSocketTaskWithURL)(self, _cmd, url);
 }
 
 id my_NSURLSessionWebSocketTaskWithURLProtocols(id self, SEL _cmd, NSURL *url, NSArray *protocols) {
     if (is_url_blocked(url)) {
-        return [self webSocketTaskWithURL:[NSURL URLWithString:@"about:blank"] protocols:protocols];
+        return createBlockedURLSessionTask();
     }
     return ((id (*)(id, SEL, NSURL *, NSArray *))orig_NSURLSessionWebSocketTaskWithURLProtocols)(self, _cmd, url, protocols);
 }
@@ -1116,11 +1116,6 @@ static void adblock_deinit(void) {
     
     for (int i = 0; i < CACHE_MUTEX_COUNT; i++) {
         pthread_mutex_destroy(&cache_mutex[i]);
-    }
-    
-    if (lookup_queue) {
-        dispatch_release(lookup_queue);
-        lookup_queue = NULL;
     }
     
     if (bloom_filter) {
