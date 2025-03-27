@@ -736,18 +736,6 @@ static id createBlockedURLSessionTask() {
     return task;
 }
 
-static id createBlockedURLSessionTask(void) {
-    static Class BlockedURLSessionTaskClass = Nil;
-    if (!BlockedURLSessionTaskClass) {
-        BlockedURLSessionTaskClass = objc_allocateClassPair([NSURLSessionDataTask class], "BlockedURLSessionTask", 0);
-        class_addMethod(BlockedURLSessionTaskClass, @selector(resume), (IMP)blocked_task_resume, "v@:");
-        class_addMethod(BlockedURLSessionTaskClass, @selector(cancel), (IMP)blocked_task_cancel, "v@:");
-        objc_registerClassPair(BlockedURLSessionTaskClass);
-    }
-    id task = [[BlockedURLSessionTaskClass alloc] init];
-    return task;
-}
-
 id my_NSURLSessionDataTaskWithURL(id self, SEL _cmd, NSURL *url) {
     if (is_url_blocked(url)) {
         return createBlockedURLSessionTask();
