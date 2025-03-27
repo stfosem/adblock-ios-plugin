@@ -89,6 +89,7 @@ static IMP orig_NSURLConnectionSendAsynchronousRequest = NULL;
 static IMP orig_NSURLConnectionInitWithRequest = NULL;
 static IMP orig_NSURLConnectionInitWithRequestStartImmediately = NULL;
 static IMP orig_NSURLConnectionConnectionWithRequestDelegate = NULL;
+static IMP orig_NSURLSessionTask_resume = NULL;
 static IMP orig_UIWebViewLoadRequest = NULL;
 static IMP orig_WKWebViewLoadRequest = NULL;
 
@@ -721,13 +722,18 @@ void my_NSNetServiceResolve(id self, SEL _cmd) {
 }
 
 static void blocked_task_resume(id self, SEL _cmd) {
-    (void)self;
-    (void)_cmd;
+    if ([self respondsToSelector:@selector(error)]) {
+        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
+                                           code:NSURLErrorCancelled 
+                                       userInfo:nil];
+        [self setValue:error forKey:@"error"];
+    }
 }
 
-static void blocked_task_cancel(id self, SEL _cmd) {
-    (void)self;
-    (void)_cmd;
+static id createBlockedURLSessionTask() {
+    id task = [[BlockedURLSessionTaskClass alloc] init];
+    [task setValue:@(NSURLSessionTaskStateCanceling) forKey:@"state"]; 
+    return task;
 }
 
 static id createBlockedURLSessionTask(void) {
@@ -920,6 +926,20 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     ((void (*)(id, SEL, NSURLRequest *))orig_UIWebViewLoadRequest)(self, _cmd, request);
 }
 
+static void my_NSURLSessionTask_resume(id self, SEL _cmd) {
+    if ([self isKindOfClass:BlockedURLSessionTaskClass]) {
+        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
+                                           code:NSURLErrorCancelled 
+                                       userInfo:nil];
+        if ([self respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) {
+            id delegate = [self valueForKey:@"delegate"];
+            [delegate URLSession:nil task:self didCompleteWithError:error];
+        }
+        return;
+    }
+    ((void (*)(id, SEL))orig_NSURLSessionTask_resume)(self, _cmd);
+}
+
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         NSString *html = @"<html />";
@@ -1075,6 +1095,14 @@ static void adblock_init(void) {
                           sel_registerName("connectionWithRequest:delegate:"),
                           (IMP)my_NSURLConnectionConnectionWithRequestDelegate,
                           &orig_NSURLConnectionConnectionWithRequestDelegate);
+    }
+
+    Class urlSessionTaskClass = objc_getClass("NSURLSessionTask");
+    if (urlSessionTaskClass) {
+        swizzleMethod(urlSessionTaskClass,
+                     sel_registerName("resume:"),
+                     (IMP)my_NSURLSessionTask_resume,
+                     &orig_NSURLSessionTask_resume);
     }
     
     Class uiWebViewClass = objc_getClass("UIWebView");
