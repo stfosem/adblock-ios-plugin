@@ -727,10 +727,11 @@ void my_NSNetServiceResolve(id self, SEL _cmd) {
 }
 
 static void blocked_task_resume(id self, SEL __unused _cmd) {
-    if ([self respondsToSelector:@selector(error)]) {
-        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
+    NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
                                            code:NSURLErrorCancelled 
                                        userInfo:nil];
+
+    if ([self respondsToSelector:@selector(error)]) {
         [self setValue:error forKey:@"error"];
     }
 
