@@ -428,6 +428,8 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(address, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
+            shutdown(socket, SHUT_RDWR);
+            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
@@ -445,6 +447,8 @@ int my_connectx(int socket,
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(remote, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
+            shutdown(socket, SHUT_RDWR);
+            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
@@ -728,10 +732,6 @@ static void blocked_task_resume(id self, SEL __unused _cmd) {
                                            code:NSURLErrorCancelled 
                                        userInfo:nil];
         [self setValue:error forKey:@"error"];
-        id completionHandler = [self valueForKey:@"completionHandler"];
-        if (completionHandler) {
-            ((void (^)(NSData *, NSURLResponse *, NSError *))completionHandler)(nil, nil, error);
-        }
     }
 }
 
