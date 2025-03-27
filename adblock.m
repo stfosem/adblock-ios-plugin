@@ -428,7 +428,7 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(address, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
-            errno = EHOSTUNREACH;
+            errno = ECONNREFUSED;
             return -1;
         }
     }
@@ -445,7 +445,7 @@ int my_connectx(int socket,
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(remote, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
-            errno = EHOSTUNREACH;
+            errno = ECONNREFUSED;
             return -1;
         }
     }
@@ -459,7 +459,7 @@ ssize_t my_sendto(int socket, const void *buffer, size_t length, int flags,
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(dest_addr, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
-            errno = EHOSTUNREACH;
+            errno = ECONNREFUSED;
             return -1;
         }
     }
@@ -473,7 +473,7 @@ ssize_t my_send(int sockfd, const void *buf, size_t len, int flags) {
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
             if (is_domain_blocked(hostname)) {
-                errno = EHOSTUNREACH;
+                errno = ECONNREFUSED;
                 return -1;
             }
         }
@@ -487,7 +487,7 @@ ssize_t my_sendmsg(int sockfd, const struct msghdr *msg, int flags) {
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(dest, hostname, sizeof(hostname))) {
             if (is_domain_blocked(hostname)) {
-                errno = EHOSTUNREACH;
+                errno = ECONNREFUSED;
                 return -1;
             }
         }
@@ -498,7 +498,7 @@ ssize_t my_sendmsg(int sockfd, const struct msghdr *msg, int flags) {
             char hostname[NI_MAXHOST] = {0};
             if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
                 if (is_domain_blocked(hostname)) {
-                    errno = EHOSTUNREACH;
+                    errno = ECONNREFUSED;
                     return -1;
                 }
             }
@@ -516,7 +516,7 @@ ssize_t my_write(int fd, const void *buf, size_t count) {
             char hostname[NI_MAXHOST] = {0};
             if (resolve_address_to_hostname((struct sockaddr *)&addr, hostname, sizeof(hostname))) {
                 if (is_domain_blocked(hostname)) {
-                    errno = EHOSTUNREACH;
+                    errno = ECONNREFUSED;
                     return -1;
                 }
             }
@@ -723,16 +723,12 @@ void my_NSNetServiceResolve(id self, SEL _cmd) {
 }
 
 static void blocked_task_resume(id self, SEL __unused _cmd) {
-    id session = [self valueForKey:@"session"];
-    id delegate = [self valueForKey:@"delegate"];
-    NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                      code:NSURLErrorCancelled 
-                                  userInfo:nil];
-    
-    if ([delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) {
-        [delegate URLSession:session task:self didCompleteWithError:error];
+    if ([self respondsToSelector:@selector(error)]) {
+        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
+                                           code:NSURLErrorCancelled 
+                                       userInfo:nil];
+        [self setValue:error forKey:@"error"];
     }
-    [self setValue:@(NSURLSessionTaskStateCompleted) forKey:@"state"];
 }
 
 static void blocked_task_cancel(id __unused self, SEL __unused _cmd) {
