@@ -733,6 +733,25 @@ static void blocked_task_resume(id self, SEL __unused _cmd) {
                                        userInfo:nil];
         [self setValue:error forKey:@"error"];
     }
+
+    id completionHandler = nil;
+    if ([self respondsToSelector:@selector(completionHandler)]) {
+        completionHandler = [self valueForKey:@"completionHandler"];
+    }
+    
+    if (completionHandler) {
+        void (^safeHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *err) {
+            ((void (^)(NSData *, NSURLResponse *, NSError *))completionHandler)(data, response, err);
+        };
+        
+        if (strcmp(dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL), dispatch_queue_get_label(dispatch_get_main_queue())) == 0) {
+            safeHandler(nil, nil, error);
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                safeHandler(nil, nil, error);
+            });
+        }
+    }
 }
 
 static void blocked_task_cancel(id __unused self, SEL __unused _cmd) {
