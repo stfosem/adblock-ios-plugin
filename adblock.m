@@ -2,6 +2,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <CFNetwork/CFNetwork.h>
 #import <UIKit/UIWebView.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <stdio.h>
