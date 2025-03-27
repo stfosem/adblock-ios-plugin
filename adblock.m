@@ -52,6 +52,7 @@ static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static dispatch_queue_t lookup_queue;
 static RadixNode *domain_trie_root = NULL;
 static uint8_t *bloom_filter = NULL;
+static Class BlockedURLSessionTaskClass = Nil;
 
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t) = NULL;
 static int (*orig_connectx)(int, const struct sockaddr *, socklen_t, const struct sockaddr *, socklen_t, void *, uint32_t, void *, uint32_t, uint32_t) = NULL;
@@ -721,18 +722,34 @@ void my_NSNetServiceResolve(id self, SEL _cmd) {
     ((void (*)(id, SEL))orig_NSNetServiceResolve)(self, _cmd);
 }
 
-static void blocked_task_resume(id self, SEL _cmd) {
-    if ([self respondsToSelector:@selector(error)]) {
-        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                           code:NSURLErrorCancelled 
-                                       userInfo:nil];
-        [self setValue:error forKey:@"error"];
+static void blocked_task_resume(id self, SEL __unused _cmd) {
+    id session = [self valueForKey:@"session"];
+    id delegate = [self valueForKey:@"delegate"];
+    NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
+                                      code:NSURLErrorCancelled 
+                                  userInfo:nil];
+    
+    if ([delegate respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) {
+        [delegate URLSession:session task:self didCompleteWithError:error];
     }
+    [self setValue:@(NSURLSessionTaskStateCompleted) forKey:@"state"];
+}
+
+static void blocked_task_cancel(id __unused self, SEL __unused _cmd) {
 }
 
 static id createBlockedURLSessionTask() {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class superClass = [NSURLSessionTask class];
+        BlockedURLSessionTaskClass = objc_allocateClassPair(superClass, "BlockedURLSessionTask", 0);
+        class_addMethod(BlockedURLSessionTaskClass, @selector(resume), (IMP)blocked_task_resume, "v@:");
+        class_addMethod(BlockedURLSessionTaskClass, @selector(cancel),(IMP)blocked_task_cancel, "v@:");
+        objc_registerClassPair(BlockedURLSessionTaskClass);
+    });
+    
     id task = [[BlockedURLSessionTaskClass alloc] init];
-    [task setValue:@(NSURLSessionTaskStateCanceling) forKey:@"state"]; 
+    [task setValue:@(NSURLSessionTaskStateCompleted) forKey:@"state"];
     return task;
 }
 
@@ -912,20 +929,6 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
         return;
     }
     ((void (*)(id, SEL, NSURLRequest *))orig_UIWebViewLoadRequest)(self, _cmd, request);
-}
-
-static void my_NSURLSessionTask_resume(id self, SEL _cmd) {
-    if ([self isKindOfClass:BlockedURLSessionTaskClass]) {
-        NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                           code:NSURLErrorCancelled 
-                                       userInfo:nil];
-        if ([self respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) {
-            id delegate = [self valueForKey:@"delegate"];
-            [delegate URLSession:nil task:self didCompleteWithError:error];
-        }
-        return;
-    }
-    ((void (*)(id, SEL))orig_NSURLSessionTask_resume)(self, _cmd);
 }
 
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
