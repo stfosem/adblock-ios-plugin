@@ -428,6 +428,8 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(address, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
+            shutdown(socket, SHUT_RDWR);
+            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
@@ -445,6 +447,8 @@ int my_connectx(int socket,
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(remote, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
+            shutdown(socket, SHUT_RDWR);
+            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
@@ -728,6 +732,10 @@ static void blocked_task_resume(id self, SEL __unused _cmd) {
                                            code:NSURLErrorCancelled 
                                        userInfo:nil];
         [self setValue:error forKey:@"error"];
+        id completionHandler = [self valueForKey:@"completionHandler"];
+        if (completionHandler) {
+            ((void (^)(NSData *, NSURLResponse *, NSError *))completionHandler)(nil, nil, error);
+        }
     }
 }
 
@@ -788,9 +796,13 @@ id my_NSURLSessionDataTaskWithRequestCompletion(id self, SEL _cmd, NSURLRequest 
             NSError *error = [NSError errorWithDomain:NSURLErrorDomain
                                                  code:NSURLErrorCannotConnectToHost
                                              userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
-            dispatch_async(dispatch_get_main_queue(), ^{
+            if ([NSThread isMainThread]) {
                 completionHandler(nil, nil, error);
-            });
+            } else {
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    completionHandler(nil, nil, error);
+                });
+            }
         }
         return createBlockedURLSessionTask();
     }
@@ -932,8 +944,8 @@ id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRe
 void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         [self stopLoading];
-        NSString *html = @"<html><head></head><body></body></html>";
-        [self loadHTMLString:html baseURL:nil];
+        [self setHidden:YES]
+        [self loadHTMLString:@"<html style='display:none;'>" baseURL:nil];
         return;
     }
     ((void (*)(id, SEL, NSURLRequest *))orig_UIWebViewLoadRequest)(self, _cmd, request);
@@ -942,8 +954,8 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         [self stopLoading];
-        NSString *html = @"<html><head></head><body></body></html>";
-        [self loadHTMLString:html baseURL:nil];
+        [self setHidden:YES]
+        [self loadHTMLString:@"<html style='display:none;'>" baseURL:nil];
         return;
     }
     ((void (*)(id, SEL, NSURLRequest *))orig_WKWebViewLoadRequest)(self, _cmd, request);
