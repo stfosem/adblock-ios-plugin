@@ -760,11 +760,15 @@ id my_NSURLSessionDataTaskWithURLCompletion(id self, SEL _cmd, NSURL *url, void 
     if (is_url_blocked(url)) {
         if (completionHandler) {
             NSError *error = [NSError errorWithDomain:NSURLErrorDomain
-                                                 code:NSURLErrorCannotConnectToHost
+                                                 code:NSURLErrorCancelled
                                              userInfo:@{NSLocalizedDescriptionKey: @"Connection blocked by content filter"}];
-            dispatch_async(dispatch_get_main_queue(), ^{
+            if ([NSThread isMainThread]) {
                 completionHandler(nil, nil, error);
-            });
+            } else {
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    completionHandler(nil, nil, error);
+                });
+            }
         }
         return createBlockedURLSessionTask();
     }
@@ -927,7 +931,8 @@ id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRe
 
 void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        NSString *html = @"<html />";
+        [self stopLoading];
+        NSString *html = @"<html><head></head><body></body></html>";
         [self loadHTMLString:html baseURL:nil];
         return;
     }
@@ -936,7 +941,8 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
 
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
-        NSString *html = @"<html />";
+        [self stopLoading];
+        NSString *html = @"<html><head></head><body></body></html>";
         [self loadHTMLString:html baseURL:nil];
         return;
     }
