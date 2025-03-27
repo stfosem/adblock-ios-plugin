@@ -1144,6 +1144,10 @@ static void adblock_init(void) {
                       sel_registerName("loadRequest:"),
                       (IMP)my_UIWebViewLoadRequest,
                       &orig_UIWebViewLoadRequest);
+    }
+
+    Class uiWebViewDelegate = objc_getClass("UIWebViewDelegate"); 
+    if (uiWebViewDelegate) {
         swizzleMethod(uiWebViewDelegateClass,
                       sel_registerName("webView:shouldStartLoadWithRequest:navigationType:"),
                       (IMP)my_UIWebViewDelegate_shouldStartLoad,
@@ -1156,7 +1160,11 @@ static void adblock_init(void) {
                       sel_registerName("loadRequest:"),
                       (IMP)my_WKWebViewLoadRequest,
                       &orig_WKWebViewLoadRequest);
-        swizzleMethod(wkWebViewDelegateClass,
+    }
+
+    Class wkNavigationDelegate = objc_getClass("WKNavigationDelegate");
+    if (wkNavigationDelegate) {
+            swizzleMethod(wkWebViewDelegateClass,
                       sel_registerName("webView:decidePolicyForNavigationAction:decisionHandler:"),
                       (IMP)my_WKWebViewDelegate_decidePolicy,
                       &orig_WKWebViewDelegate_decidePolicy);
