@@ -944,7 +944,7 @@ id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRe
 void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         [self stopLoading];
-        [self setHidden:YES]
+        [self setHidden:YES];
         [self loadHTMLString:@"<html style='display:none;'>" baseURL:nil];
         return;
     }
@@ -954,7 +954,7 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         [self stopLoading];
-        [self setHidden:YES]
+        [self setHidden:YES];
         [self loadHTMLString:@"<html style='display:none;'>" baseURL:nil];
         return;
     }
