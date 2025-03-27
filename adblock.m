@@ -428,8 +428,6 @@ int my_connect(int socket, const struct sockaddr *address, socklen_t address_len
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(address, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
-            shutdown(socket, SHUT_RDWR);
-            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
@@ -447,8 +445,6 @@ int my_connectx(int socket,
         char hostname[NI_MAXHOST] = {0};
         if (resolve_address_to_hostname(remote, hostname, sizeof(hostname)) &&
             is_domain_blocked(hostname)) {
-            shutdown(socket, SHUT_RDWR);
-            close(socket);
             errno = ECONNREFUSED;
             return -1;
         }
