@@ -915,6 +915,13 @@ id my_NSURLConnectionInitWithRequestStartImmediately(id self, SEL _cmd, NSURLReq
     return ((id (*)(id, SEL, NSURLRequest *, id, BOOL))orig_NSURLConnectionInitWithRequestStartImmediately)(self, _cmd, request, delegate, startImmediately);
 }
 
+static void my_NSURLSessionTask_resume(id self, SEL _cmd) {
+    if (BlockedURLSessionTaskClass && [self isKindOfClass:BlockedURLSessionTaskClass]) {
+        return;
+    }
+    ((void (*)(id, SEL))orig_NSURLSessionTask_resume)(self, _cmd);
+}
+
 id my_NSURLConnectionConnectionWithRequestDelegate(Class self, SEL _cmd, NSURLRequest *request, id delegate) {
     if (is_url_blocked(request.URL)) {
         return nil;
