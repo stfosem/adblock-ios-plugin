@@ -92,7 +92,9 @@ static IMP orig_NSURLConnectionInitWithRequestStartImmediately = NULL;
 static IMP orig_NSURLConnectionConnectionWithRequestDelegate = NULL;
 static IMP orig_NSURLSessionTask_resume = NULL;
 static IMP orig_UIWebViewLoadRequest = NULL;
+static IMP orig_UIWebViewDelegate_shouldStartLoad = NULL;
 static IMP orig_WKWebViewLoadRequest = NULL;
+static IMP orig_WKWebViewDelegate_decidePolicy = NULL;
 
 static inline void CFStringToBuffer(CFStringRef string, char *buffer, size_t bufferSize) {
     if (string && buffer && bufferSize > 0) {
@@ -947,6 +949,16 @@ void my_UIWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     ((void (*)(id, SEL, NSURLRequest *))orig_UIWebViewLoadRequest)(self, _cmd, request);
 }
 
+BOOL my_UIWebViewDelegate_shouldStartLoad(id self, SEL _cmd, UIWebView *webView, NSURLRequest *request, UIWebViewNavigationType navigationType) {
+    if (is_url_blocked(request.URL)) {
+        return NO;
+    }
+    if (orig_UIWebViewDelegate_shouldStartLoad) {
+        return ((BOOL (*)(id, SEL, UIWebView *, NSURLRequest *, UIWebViewNavigationType))orig_UIWebViewDelegate_shouldStartLoad)(self, _cmd, webView, request, navigationType);
+    }
+    return YES;
+}
+
 void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
     if (is_url_blocked(request.URL)) {
         [self stopLoading];
@@ -955,6 +967,18 @@ void my_WKWebViewLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
         return;
     }
     ((void (*)(id, SEL, NSURLRequest *))orig_WKWebViewLoadRequest)(self, _cmd, request);
+}
+
+void my_WKWebViewDelegate_decidePolicy(id self, SEL _cmd, WKWebView *webView, WKNavigationAction *navigationAction, void (^decisionHandler)(WKNavigationActionPolicy)) {
+    if (is_url_blocked(navigationAction.request.URL)) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    if (orig_WKWebViewDelegate_decidePolicy) {
+        ((void (*)(id, SEL, WKWebView *, WKNavigationAction *, void (^)(WKNavigationActionPolicy)))orig_WKWebViewDelegate_decidePolicy)(self, _cmd, webView, navigationAction, decisionHandler);
+    } else {
+        decisionHandler(WKNavigationActionPolicyAllow);
+    }
 }
 
 static void swizzleMethod(Class class, SEL originalSelector, IMP replacement, IMP *originalMethod) {
@@ -1119,6 +1143,10 @@ static void adblock_init(void) {
                       sel_registerName("loadRequest:"),
                       (IMP)my_UIWebViewLoadRequest,
                       &orig_UIWebViewLoadRequest);
+        swizzleMethod(uiWebViewDelegateClass,
+                      sel_registerName("webView:shouldStartLoadWithRequest:navigationType:"),
+                      (IMP)my_UIWebViewDelegate_shouldStartLoad,
+                      &orig_UIWebViewDelegate_shouldStartLoad);
     }
     
     Class wkWebViewClass = objc_getClass("WKWebView");
@@ -1127,6 +1155,10 @@ static void adblock_init(void) {
                       sel_registerName("loadRequest:"),
                       (IMP)my_WKWebViewLoadRequest,
                       &orig_WKWebViewLoadRequest);
+        swizzleMethod(wkWebViewDelegateClass,
+                      sel_registerName("webView:decidePolicyForNavigationAction:decisionHandler:"),
+                      (IMP)my_WKWebViewDelegate_decidePolicy,
+                      &orig_WKWebViewDelegate_decidePolicy);
     }
 }
 
